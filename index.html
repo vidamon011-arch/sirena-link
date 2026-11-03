@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="sl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sirena – daljinski preizkus</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#172033;background:#f2f4f8}body{max-width:680px;margin:0 auto;padding:22px}
+main{background:white;border-radius:18px;padding:24px;box-shadow:0 8px 28px #17203314}
+h1{margin-top:0}.muted{color:#5b6474;line-height:1.5}.panel{border:1px solid #dce1ea;border-radius:14px;padding:18px;margin:16px 0}
+button{font:inherit;font-weight:700;border:0;border-radius:12px;padding:13px 16px;margin:5px 5px 5px 0;cursor:pointer}
+.primary{background:#b91c1c;color:white}.safe{background:#e7ebf2;color:#172033}.good{background:#166534;color:white}
+input{font:inherit;padding:12px;width:min(95%,350px);border:1px solid #b8c1d1;border-radius:10px}
+#status{font-weight:700;margin-top:12px}.hidden{display:none}.link{overflow-wrap:anywhere}
+</style></head><body><main>
+<h1>🚨 Sirena – daljinski preizkus</h1>
+<p class="muted">Zvok se predvaja samo po izrecni vključitvi na prejemnikovem telefonu. Prejemnik lahko kadarkoli pritisne STOP. Preizkusni zvok traja največ 10 sekund.</p>
+<section id="home" class="panel">
+<h2>Ustvari nadzorno sobo</h2>
+<button id="create" class="good">USTVARI LINK</button>
+<p class="muted">Ustvari sobo in povezavo, ki jo pošlješ osebi, ki se strinja s preizkusom.</p>
+<hr>
+<h2>Pridruži se sobi</h2>
+<input id="roomInput" placeholder="Vpiši kodo sobe">
+<button id="join" class="safe">PRIDRUŽI SE</button>
+</section>
+<section id="admin" class="panel hidden">
+<h2>Nadzorna plošča</h2><p class="muted">Povezava za prijatelja:</p><p id="share" class="link"></p>
+<button id="copy" class="safe">KOPIRAJ LINK</button>
+<p id="guests">Povezani telefoni: 0</p>
+<button id="start" class="primary">ZAŽENI SIRENO</button>
+<button id="stop" class="safe">USTAVI</button>
+</section>
+<section id="guest" class="panel hidden">
+<h2>Prejemnik</h2><p class="muted">Ko si pripravljen/-a in se strinjaš s preizkusom, vključi zvok. Telefon mora ostati na tej strani.</p>
+<button id="enable" class="good">OMOGOČI ZVOK</button>
+<button id="localStop" class="safe">STOP</button>
+</section>
+<p id="status" role="status">Ni povezano.</p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let ws=null, audioCtx=null, oscillator=null, gain=null, stopTimer=null, currentRole=null, currentRoom=null;
+const setStatus=t=>$("status").textContent=t;
+function stopSound(){
+  if(stopTimer) clearTimeout(stopTimer); stopTimer=null;
+  if(gain){ try{gain.gain.cancelScheduledValues(audioCtx.currentTime);gain.gain.setTargetAtTime(0,audioCtx.currentTime,0.025);}catch{} }
+  if(oscillator){try{oscillator.stop(audioCtx.currentTime+0.12)}catch{}}
+  oscillator=null;gain=null;
+}
+async function startSound(){
+  if(!audioCtx || audioCtx.state!=="running"){setStatus("Najprej pritisni »OMOGOČI ZVOK« na tem telefonu.");return;}
+  stopSound();
+  oscillator=audioCtx.createOscillator(); gain=audioCtx.createGain();
+  oscillator.type="sawtooth"; oscillator.frequency.value=660;
+  gain.gain.value=0.0001; oscillator.connect(gain);gain.connect(audioCtx.destination);
+  oscillator.start();
+  const t=audioCtx.currentTime;
+  gain.gain.setTargetAtTime(0.14,t,0.03);
+  const cycle=()=>{
+    if(!oscillator)return;
+    const now=audioCtx.currentTime;
+    oscillator.frequency.setTargetAtTime(920,now,0.04);
+    oscillator.frequency.setTargetAtTime(620,now+0.48,0.04);
+  };
+  cycle(); const interval=setInterval(()=>{if(!oscillator){clearInterval(interval);return;}cycle();},960);
+  stopTimer=setTimeout(()=>{clearInterval(interval);stopSound();setStatus("Sirena se je samodejno ustavila.");},10000);
+  setStatus("Sirena predvaja. Za takojšnjo ustavitev pritisni STOP.");
+}
+function connect(room,role){
+  currentRoom=room;currentRole=role;
+  const scheme=location.protocol==="https:"?"wss:":"ws:";
+  ws=new WebSocket(`${scheme}//${location.host}/?room=${encodeURIComponent(room)}&role=${role}`);
+  ws.onopen=()=>setStatus("Povezano. "+(role==="admin"?"Pošlji prijatelju link.":"Po potrebi vključi zvok."));
+  ws.onmessage=e=>{
+    const m=JSON.parse(e.data);
+    if(m.type==="status"&&role==="admin"&&Number.isInteger(m.guests))$("guests").textContent="Povezani telefoni: "+m.guests;
+    if(m.type==="start"&&role==="guest")startSound();
+    if(m.type==="stop"&&role==="guest"){stopSound();setStatus("Nadzorna oseba je ustavila sireno.");}
+    if(m.type==="status"&&role==="guest"&&m.connected)setStatus("Povezano z nadzorno sobo.");
+  };
+  ws.onclose=()=>{stopSound();setStatus("Povezava je prekinjena.");};
+  ws.onerror=()=>setStatus("Napaka povezave. Poskusi znova.");
+}
+$("create").onclick=async()=>{
+  try{
+    const r=await fetch("/api/room",{method:"POST"});const d=await r.json();
+    $("home").classList.add("hidden");$("admin").classList.remove("hidden");
+    const link=`${location.origin}/?join=${d.id}`;$("share").textContent=link;
+    connect(d.id,"admin");
+  }catch{setStatus("Sobe ni bilo mogoče ustvariti.");}
+};
+$("join").onclick=()=>{
+  const id=$("roomInput").value.trim();
+  if(!/^[a-f0-9]{10}$/i.test(id)){setStatus("Vpiši veljavno 10-mestno kodo sobe.");return;}
+  enterGuest(id);
+};
+function enterGuest(id){
+  $("home").classList.add("hidden");$("guest").classList.remove("hidden");
+  connect(id,"guest");
+}
+$("enable").onclick=async()=>{
+  try{audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();await audioCtx.resume();setStatus("Zvok je omogočen. Počakaj na signal.");}
+  catch{setStatus("Brskalnik ni dovolil zvoka.");}
+};
+$("localStop").onclick=()=>{stopSound();setStatus("Zvok ustavljen.");};
+$("start").onclick=()=>{if(ws?.readyState===1)ws.send(JSON.stringify({type:"start"}));else setStatus("Ni povezave.");};
+$("stop").onclick=()=>{if(ws?.readyState===1)ws.send(JSON.stringify({type:"stop"}));};
+$("copy").onclick=async()=>{try{await navigator.clipboard.writeText($("share").textContent);setStatus("Link kopiran.");}catch{setStatus("Označi in kopiraj link zgoraj.");}};
+const query=new URLSearchParams(location.search).get("join");
+if(query&&/^[a-f0-9]{10}$/i.test(query)){$("roomInput").value=query;enterGuest(query);}
+</script></body></html>
